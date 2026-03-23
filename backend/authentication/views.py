@@ -9,10 +9,21 @@ from django.conf import settings
 
 class LoginView(APIView):
     def post(self, request):
-        username = request.data.get('username')
-        password = request.data.get('password')
+        username = request.data.get('username', '').strip()
+        password = request.data.get('password', '')
 
+        # Try standard username auth
         user = authenticate(username=username, password=password)
+        
+        # Fallback: Many users try to log in with their email address instead of username
+        if not user:
+            try:
+                # Case-insensitive email match
+                user_obj = User.objects.get(email__iexact=username)
+                if user_obj.check_password(password):
+                    user = user_obj
+            except User.DoesNotExist:
+                pass
 
         if user:
             payload = {
@@ -21,8 +32,11 @@ class LoginView(APIView):
                 'iat': datetime.datetime.utcnow()
             }
             token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
-            return Response({'token': token}, status=status.HTTP_200_OK)
-        
+            return Response({
+                'token': token,
+                'is_staff': user.is_staff
+            }, status=status.HTTP_200_OK)
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
 
 class RegisterView(APIView):
@@ -47,4 +61,8 @@ class RegisterView(APIView):
         }
         token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
         
-        return Response({'token': token, 'user_id': user.id}, status=status.HTTP_201_CREATED)
+        return Response({
+            'token': token, 
+            'user_id': user.id,
+            'is_staff': user.is_staff
+        }, status=status.HTTP_201_CREATED)
