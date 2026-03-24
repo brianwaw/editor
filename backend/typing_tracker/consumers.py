@@ -138,6 +138,11 @@ class TypingConsumer(AsyncWebsocketConsumer):
 
         if valid_ops:
             await append_ops_to_stream(self.session_id, valid_ops)
+            
+            # Instantly flag this session as an active "Draft" even before DB save
+            if getattr(self.db_session, "has_started_typing", False) is False:
+                self.db_session.has_started_typing = True
+                await self._save_session()
 
         burst_detected = self._check_burst()
         logger.info("Burst check: %s, burst_count: %d", burst_detected, self.db_session.burst_count)
@@ -179,6 +184,10 @@ class TypingConsumer(AsyncWebsocketConsumer):
         attempted_len = payload.get("attempted_len", len(op["text"]))
         
         await append_ops_to_stream(self.session_id, [op])
+
+        if getattr(self.db_session, "has_started_typing", False) is False:
+            self.db_session.has_started_typing = True
+            await self._save_session()
 
         self._record_insert(attempted_len)
         
@@ -232,6 +241,9 @@ class TypingConsumer(AsyncWebsocketConsumer):
         """Pull full op history from Redis, persist to Postgres, clean stream."""
         ops = await read_all_ops_from_stream(self.session_id)
         if ops:
+            # Reconstruct and strictly apply the newest operations directly to the DB
+            await self._apply_ops_to_submission(ops)
+            
             existing = self.db_session.op_snapshot or []
             existing.extend(ops)
             self.db_session.op_snapshot = existing
@@ -261,6 +273,36 @@ class TypingConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _save_session(self):
         self.db_session.save()
+
+    @database_sync_to_async
+    def _apply_ops_to_submission(self, ops: list[dict]):
+        from assignments.models import Submission
+        try:
+            submission = Submission.objects.get(typing_session=self.db_session)
+            code = submission.current_code or ""
+            for op in ops:
+                pos = op.get("pos", 0)
+                length = op.get("len", 0)
+                text = op.get("text", "")
+                
+                # Monaco offsets accurately measure UTF-16 code units.
+                # Converting via 'utf-16-le' directly supports emoticons and complex chars natively!
+                encoded = code.encode('utf-16-le')
+                pos_bytes = pos * 2
+                len_bytes = length * 2
+                text_encoded = text.encode('utf-16-le')
+                
+                if op.get("op") in ("insert", "replace"):
+                    encoded = encoded[:pos_bytes] + text_encoded + encoded[pos_bytes + len_bytes:]
+                elif op.get("op") == "delete":
+                    encoded = encoded[:pos_bytes] + encoded[pos_bytes + len_bytes:]
+                
+                code = encoded.decode('utf-16-le', errors='replace')
+            
+            submission.current_code = code
+            submission.save(update_fields=["current_code", "updated_at"])
+        except Exception as e:
+            logger.error(f"Failed to apply ops to submission {self.session_id}: {e}")
 
     # ------------------------------------------------------------------
     # Auth helper

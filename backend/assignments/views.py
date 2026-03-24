@@ -1,8 +1,9 @@
 from rest_framework import views, status, permissions
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
+from django.contrib.auth.models import User
 from .models import Assignment, Submission, Language
-from .serializers import AssignmentSerializer, SubmissionSerializer, LanguageSerializer
+from .serializers import AssignmentSerializer, SubmissionSerializer, LanguageSerializer, UserSerializer, TypingSessionSerializer
 from typing_tracker.models import TypingSession
 
 class IsLecturerConstraint(permissions.BasePermission):
@@ -39,13 +40,35 @@ class AssignmentDetailView(views.APIView):
     
     def get(self, request, pk):
         assignment = get_object_or_404(Assignment, pk=pk)
+        data = AssignmentSerializer(assignment, context={'request': request}).data
         
-        # If lecturer, return assignment + all submissions
+        # If lecturer, return assignment + all submissions (or unattempted status)
         if request.user.is_staff:
-            submissions = Submission.objects.filter(assignment=assignment)
+            students = User.objects.filter(is_staff=False)
+            all_statuses = []
+            for student in students:
+                sub = assignment.submissions.filter(student=student).first()
+                if sub:
+                    has_typed = bool((sub.current_code and sub.current_code.strip()) or getattr(sub.typing_session, "has_started_typing", False))
+                    status = 'submitted' if sub.status == 'submitted' else ('draft' if has_typed else 'unattempted')
+                    all_statuses.append({
+                        'student': UserSerializer(student).data,
+                        'status': status,
+                        'current_code': sub.current_code,
+                        'updated_at': sub.updated_at,
+                        'typing_session': TypingSessionSerializer(sub.typing_session).data if getattr(sub, 'typing_session', None) else None,
+                    })
+                else:
+                    all_statuses.append({
+                        'student': UserSerializer(student).data,
+                        'status': 'unattempted',
+                        'current_code': '',
+                        'updated_at': None,
+                        'typing_session': None,
+                    })
             return Response({
-                "assignment": AssignmentSerializer(assignment).data,
-                "submissions": SubmissionSerializer(submissions, many=True).data
+                "assignment": data,
+                "submissions": all_statuses
             })
             
         # If student, return assignment + their own submission (if any)
@@ -88,7 +111,10 @@ class AssignmentSessionView(views.APIView):
             "session_id": str(submission.typing_session.session_id),
             "current_code": submission.current_code,
             "language": assignment.language.name.lower() if assignment.language else "python",
+            "language_name": assignment.language.name if assignment.language else "Python",
+            "language_icon": assignment.language.icon.url if (assignment.language and assignment.language.icon) else None,
             "assignment_title": assignment.title,
+            "due_date": assignment.due_date,
             "status": submission.status
         })
 

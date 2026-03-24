@@ -24,6 +24,9 @@ class TypingSession(models.Model):
     # Set to True when a suspicious paste burst is detected.
     is_flagged = models.BooleanField(default=False)
 
+    # Set to True the moment the first keystroke hits the WebSocket to track live drafts.
+    has_started_typing = models.BooleanField(default=False)
+
     # Count of distinct bursts (>= 600 chars in < 3s) during this session
     burst_count = models.IntegerField(default=0)
 
